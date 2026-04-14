@@ -1,0 +1,47 @@
+# Log-based metric: CSP reports grouped by referring domain
+#
+# Counts CSP violation reports (report-uri / application/csp-report format) and
+# attaches a `referrer_host` label with the hostname extracted from the
+# `document-uri` field.  Use this metric as the basis for the accompanying
+# alert policy (alert-policy-csp-by-referrer.yaml).
+#
+# Deploy with:
+#   gcloud logging metrics create csp_reports_by_referrer \
+#     --config-from-file=sample_alerts/log-metric-csp-by-referrer.yaml
+#
+# Update an existing metric with:
+#   gcloud logging metrics update csp_reports_by_referrer \
+#     --config-from-file=sample_alerts/log-metric-csp-by-referrer.yaml
+
+name: csp_reports_by_referrer
+description: >-
+  Counts CSP violation reports received by gcp-log-csp, labelled by the
+  hostname of the referring page (document-uri).  Only covers reports in the
+  legacy report-uri format (application/csp-report) where document-uri is
+  present as a top-level field.
+
+# Match structured log entries written by gcp-log-csp for valid reports.
+# The nested path reflects the log structure:
+#   jsonPayload["csp-report"]          – outer key set by the app
+#     ["csp-report"]                   – inner object from the browser report
+#       ["document-uri"]               – the referring page URL
+filter: |-
+  resource.type="cloud_run_revision"
+  severity="WARNING"
+  jsonPayload.message="CSP violation report received"
+  jsonPayload."csp-report"."csp-report"."document-uri"!=""
+
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+  labels:
+    - key: referrer_host
+      valueType: STRING
+      description: >-
+        Hostname extracted from the document-uri field of the CSP report
+        (e.g. "example.com").
+
+# Extract just the hostname from a URL such as "https://example.com/path".
+labelExtractors:
+  referrer_host: 'REGEXP_EXTRACT(jsonPayload["csp-report"]["csp-report"]["document-uri"], "^https?://([^/:?#]+)")'

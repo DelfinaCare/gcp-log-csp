@@ -1,0 +1,84 @@
+# Alert policy: more than N CSP reports from a single referring domain
+#
+# Triggers when the number of CSP violation reports from any one referring
+# domain exceeds THRESHOLD_VALUE within a 5-minute window.  A burst like
+# this can indicate a misconfigured policy or an injection attack against a
+# specific page.
+#
+# Prerequisites:
+#   Deploy the log-based metric first:
+#     gcloud logging metrics create csp_reports_by_referrer \
+#       --config-from-file=sample_alerts/log-metric-csp-by-referrer.yaml
+#
+# Deploy this policy with:
+#   gcloud alpha monitoring policies create \
+#     --policy-from-file=sample_alerts/alert-policy-csp-by-referrer.yaml
+#
+# Adjust `thresholdValue` to the value of N that is appropriate for your
+# traffic level.  The example below fires when any single referrer generates
+# more than 100 reports in a 5-minute window.
+#
+# To attach a notification channel (email, PagerDuty, etc.) add its full
+# resource name to the `notificationChannels` list, e.g.:
+#   notificationChannels:
+#     - projects/MY_PROJECT/notificationChannels/CHANNEL_ID
+# List available channels with:
+#   gcloud alpha monitoring channels list
+
+displayName: "High CSP violations from a referring domain"
+
+documentation:
+  content: |-
+    **Referring domain**: {{ metric.label.referrer_host }}
+
+    A single referring domain has generated more than the allowed number of CSP
+    violation reports in a 5-minute window.  Possible causes:
+
+    - A CSP directive is too restrictive for content loaded by that page.
+    - A third-party script or resource was recently added without updating the
+      policy.
+    - An attacker is injecting resources that violate the policy.
+
+    **Next steps**
+    1. Check Cloud Logging for recent entries:
+       `jsonPayload.message="CSP violation report received"`
+    2. Identify the `blocked-uri` and `violated-directive` values.
+    3. Update the CSP header or investigate the blocked resource.
+  mimeType: text/markdown
+
+conditions:
+  - displayName: "CSP reports per referrer exceed threshold in 5 min"
+    conditionThreshold:
+      # Filter to the user-defined log metric created by log-metric-csp-by-referrer.yaml.
+      # The metric is already split by referrer_host, so each time series
+      # represents one referring domain.
+      filter: >-
+        resource.type="cloud_run_revision"
+        AND metric.type="logging.googleapis.com/user/csp_reports_by_referrer"
+      comparison: COMPARISON_GT
+      # Number of reports that must be exceeded to trigger the alert.
+      # Tune this to your expected traffic — start high and lower it once you
+      # have baseline data.
+      thresholdValue: 100
+      # Evaluate the condition immediately when the threshold is first crossed
+      # (duration "0s").  Increase this (e.g. "60s") to require the condition
+      # to hold for longer before alerting.
+      duration: "0s"
+      aggregations:
+        - alignmentPeriod: "300s"   # 5-minute window
+          # Sum all DELTA samples within the window to get a total count.
+          perSeriesAligner: ALIGN_SUM
+          # Keep each referrer_host series separate so the alert fires
+          # per-domain rather than for the aggregate total.
+          crossSeriesReducer: REDUCE_NONE
+
+# OR combiner is correct when there is only one condition.
+combiner: OR
+
+alertStrategy:
+  # Suppress repeat notifications for the same condition for 5 minutes.
+  notificationRateLimit:
+    period: "300s"
+
+# Add notification channel resource names here.
+notificationChannels: []
