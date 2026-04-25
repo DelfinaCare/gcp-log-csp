@@ -166,7 +166,7 @@ fn is_accepted_content_type(ct: &str) -> bool {
 /// The header format is `TRACE_ID/SPAN_ID;o=OPTIONS`.  Cloud Run always sets
 /// this header.  We return the full `projects/{project}/traces/{trace_id}`
 /// resource name that GCP structured logging expects in the
-/// `logging.googleapis.com/trace` field.  If the header or the `GCP_PROJECT`
+/// `logging.googleapis.com/trace` field.  If the header or the `GOOGLE_CLOUD_PROJECT`
 /// env-var is missing, returns `None`.
 fn extract_trace(headers: &HeaderMap) -> Option<String> {
     let header_val = headers
@@ -174,7 +174,7 @@ fn extract_trace(headers: &HeaderMap) -> Option<String> {
         .and_then(|v| v.to_str().ok())?;
     // Trace ID is everything before the first '/'.
     let trace_id = header_val.split('/').next().filter(|s| !s.is_empty())?;
-    let project = std::env::var("GCP_PROJECT").ok()?;
+    let project = std::env::var("GOOGLE_CLOUD_PROJECT").ok()?;
     Some(format!("projects/{project}/traces/{trace_id}"))
 }
 
