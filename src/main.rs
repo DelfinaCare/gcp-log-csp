@@ -73,7 +73,7 @@ async fn handle_csp_report(
             let raw_body = String::from_utf8_lossy(&body);
             let truncated = if raw_body.len() > MAX_LOG_BODY_LEN {
                 let mut end = MAX_LOG_BODY_LEN;
-                while !raw_body.is_char_boundary(end) {
+                while end > 0 && !raw_body.is_char_boundary(end) {
                     end -= 1;
                 }
                 format!("{}… ({} bytes total)", &raw_body[..end], body.len())
