@@ -58,9 +58,7 @@ async fn handle_csp_report(
                 "httpRequest": http_request,
                 "csp-report": parsed
             });
-            if let Some(ref t) = trace {
-                log_entry["logging.googleapis.com/trace"] = serde_json::Value::String(t.clone());
-            }
+            set_trace(&mut log_entry, &trace);
             println!("{log_entry}");
         }
         Err(_) => {
@@ -70,9 +68,7 @@ async fn handle_csp_report(
                 "httpRequest": http_request,
                 "raw-body": String::from_utf8_lossy(&body)
             });
-            if let Some(ref t) = trace {
-                log_entry["logging.googleapis.com/trace"] = serde_json::Value::String(t.clone());
-            }
+            set_trace(&mut log_entry, &trace);
             println!("{log_entry}");
             return StatusCode::BAD_REQUEST;
         }
@@ -180,6 +176,15 @@ fn extract_trace(headers: &HeaderMap) -> Option<String> {
     let trace_id = header_val.split('/').next().filter(|s| !s.is_empty())?;
     let project = std::env::var("GCP_PROJECT").ok()?;
     Some(format!("projects/{project}/traces/{trace_id}"))
+}
+
+/// If a GCP trace string is present, inject it into the log entry under the
+/// `logging.googleapis.com/trace` key so Cloud Logging correlates the entry
+/// with the originating request trace.
+fn set_trace(log_entry: &mut serde_json::Value, trace: &Option<String>) {
+    if let Some(t) = trace {
+        log_entry["logging.googleapis.com/trace"] = serde_json::Value::String(t.clone());
+    }
 }
 
 /// Wait for a SIGTERM or Ctrl+C signal, then log and return so the server
