@@ -15,9 +15,6 @@ const MAX_BODY_SIZE: usize = 16_384;
 /// Request processing timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Maximum number of raw-body bytes included in error log entries.
-const MAX_LOG_BODY_LEN: usize = 512;
-
 /// Build the application router.
 pub fn app(csp_endpoint: &str) -> Router {
     Router::new()
@@ -58,34 +55,31 @@ async fn handle_csp_report(
     }
 
     let http_request = build_http_request_log(&peer_addr, &method, &uri, &headers, body.len());
+    let trace = extract_trace(&headers);
 
     match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(parsed) => {
-            let log_entry = serde_json::json!({
+            let mut log_entry = serde_json::json!({
                 "severity": "WARNING",
                 "message": "CSP violation report received",
                 "httpRequest": http_request,
                 "csp-report": parsed
             });
+            if let Some(ref t) = trace {
+                log_entry["logging.googleapis.com/trace"] = serde_json::Value::String(t.clone());
+            }
             println!("{log_entry}");
         }
         Err(_) => {
-            let raw_body = String::from_utf8_lossy(&body);
-            let truncated = if raw_body.len() > MAX_LOG_BODY_LEN {
-                let mut end = MAX_LOG_BODY_LEN;
-                while end > 0 && !raw_body.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}… ({} bytes total)", &raw_body[..end], body.len())
-            } else {
-                raw_body.into_owned()
-            };
-            let log_entry = serde_json::json!({
+            let mut log_entry = serde_json::json!({
                 "severity": "WARNING",
                 "message": "CSP report received with invalid JSON body",
                 "httpRequest": http_request,
-                "raw-body": truncated
+                "raw-body": String::from_utf8_lossy(&body)
             });
+            if let Some(ref t) = trace {
+                log_entry["logging.googleapis.com/trace"] = serde_json::Value::String(t.clone());
+            }
             println!("{log_entry}");
             return StatusCode::BAD_REQUEST;
         }
@@ -176,6 +170,23 @@ fn is_accepted_content_type(ct: &str) -> bool {
     ct_lower.starts_with("application/csp-report")
         || ct_lower.starts_with("application/json")
         || ct_lower.starts_with("application/reports+json")
+}
+
+/// Extract the GCP trace resource name from the `X-Cloud-Trace-Context` header.
+///
+/// The header format is `TRACE_ID/SPAN_ID;o=OPTIONS`.  Cloud Run always sets
+/// this header.  We return the full `projects/{project}/traces/{trace_id}`
+/// resource name that GCP structured logging expects in the
+/// `logging.googleapis.com/trace` field.  If the header or the `GCP_PROJECT`
+/// env-var is missing, returns `None`.
+fn extract_trace(headers: &HeaderMap) -> Option<String> {
+    let header_val = headers
+        .get("x-cloud-trace-context")
+        .and_then(|v| v.to_str().ok())?;
+    // Trace ID is everything before the first '/'.
+    let trace_id = header_val.split('/').next().filter(|s| !s.is_empty())?;
+    let project = std::env::var("GCP_PROJECT").ok()?;
+    Some(format!("projects/{project}/traces/{trace_id}"))
 }
 
 /// Wait for a SIGTERM or Ctrl+C signal, then log and return so the server
