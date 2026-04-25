@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 use axum::{
     body::Bytes,
     extract::{ConnectInfo, DefaultBodyLimit},
@@ -6,14 +8,9 @@ use axum::{
     Router,
 };
 use std::net::SocketAddr;
-use std::time::Duration;
-use tower_http::timeout::TimeoutLayer;
 
 /// Maximum request body size: 16 KiB
 const MAX_BODY_SIZE: usize = 16_384;
-
-/// Request processing timeout.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Build the application router.
 pub fn app(csp_endpoint: &str) -> Router {
@@ -21,10 +18,6 @@ pub fn app(csp_endpoint: &str) -> Router {
         .route(csp_endpoint, post(handle_csp_report))
         .route("/health", get(health))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            REQUEST_TIMEOUT,
-        ))
 }
 
 /// Health check endpoint.
