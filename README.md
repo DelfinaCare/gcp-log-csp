@@ -60,6 +60,15 @@ gcloud run deploy gcp-log-csp \
   --allow-unauthenticated
 ```
 
+### Rate Limiting
+
+This service does not implement application-level rate limiting. When deploying
+to Cloud Run with `--allow-unauthenticated`, use
+[Google Cloud Armor](https://cloud.google.com/armor/docs/cloud-armor-overview)
+to apply rate-limiting rules and protect the endpoint from abuse. Cloud Armor
+security policies can be attached via a global external Application Load
+Balancer in front of your Cloud Run service.
+
 ### CSP Header Example
 
 Point your CSP reporting to the deployed service:
