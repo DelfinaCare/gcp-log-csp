@@ -6,9 +6,17 @@ use axum::{
     Router,
 };
 use std::net::SocketAddr;
+use std::time::Duration;
+use tower_http::timeout::TimeoutLayer;
 
 /// Maximum request body size: 16 KiB
 const MAX_BODY_SIZE: usize = 16_384;
+
+/// Request processing timeout.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum number of raw-body bytes included in error log entries.
+const MAX_LOG_BODY_LEN: usize = 512;
 
 /// Build the application router.
 pub fn app(csp_endpoint: &str) -> Router {
@@ -16,6 +24,10 @@ pub fn app(csp_endpoint: &str) -> Router {
         .route(csp_endpoint, post(handle_csp_report))
         .route("/health", get(health))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
 }
 
 /// Health check endpoint.
@@ -58,11 +70,21 @@ async fn handle_csp_report(
             println!("{log_entry}");
         }
         Err(_) => {
+            let raw_body = String::from_utf8_lossy(&body);
+            let truncated = if raw_body.len() > MAX_LOG_BODY_LEN {
+                let mut end = MAX_LOG_BODY_LEN;
+                while !raw_body.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}… ({} bytes total)", &raw_body[..end], body.len())
+            } else {
+                raw_body.into_owned()
+            };
             let log_entry = serde_json::json!({
                 "severity": "WARNING",
                 "message": "CSP report received with invalid JSON body",
                 "httpRequest": http_request,
-                "raw-body": String::from_utf8_lossy(&body)
+                "raw-body": truncated
             });
             println!("{log_entry}");
             return StatusCode::BAD_REQUEST;
@@ -156,6 +178,38 @@ fn is_accepted_content_type(ct: &str) -> bool {
         || ct_lower.starts_with("application/reports+json")
 }
 
+/// Wait for a SIGTERM or Ctrl+C signal, then log and return so the server
+/// can drain in-flight connections.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    let log_entry = serde_json::json!({
+        "severity": "INFO",
+        "message": "Shutdown signal received, draining connections"
+    });
+    println!("{log_entry}");
+}
+
 #[tokio::main]
 async fn main() {
     let port: u16 = std::env::var("PORT")
@@ -165,16 +219,33 @@ async fn main() {
 
     let csp_endpoint = std::env::var("CSP_ENDPOINT").unwrap_or_else(|_| "/csp-report".to_string());
 
+    if !csp_endpoint.starts_with('/') {
+        let log_entry = serde_json::json!({
+            "severity": "ERROR",
+            "message": format!("CSP_ENDPOINT must start with '/', got: {csp_endpoint}")
+        });
+        println!("{log_entry}");
+        std::process::exit(1);
+    }
+
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind to address");
 
-    eprintln!("Listening on {addr}");
+    let log_entry = serde_json::json!({
+        "severity": "INFO",
+        "message": format!("Listening on {addr}"),
+        "port": port,
+        "csp_endpoint": &csp_endpoint
+    });
+    println!("{log_entry}");
+
     axum::serve(
         listener,
         app(&csp_endpoint).into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("server error");
 }
