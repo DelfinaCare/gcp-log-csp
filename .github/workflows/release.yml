@@ -72,3 +72,54 @@ jobs:
         with:
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
           upload-release-assets: true
+
+  build-binaries:
+    name: Build Binary (${{ matrix.asset_name }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset_name: gcp-log-csp-linux-amd64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset_name: gcp-log-csp-linux-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_name: gcp-log-csp-darwin-amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset_name: gcp-log-csp-darwin-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_name: gcp-log-csp-windows-amd64.exe
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary (Unix)
+        if: matrix.os != 'windows-latest'
+        run: cp target/${{ matrix.target }}/release/gcp-log-csp ${{ matrix.asset_name }}
+
+      - name: Rename binary (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cp target/${{ matrix.target }}/release/gcp-log-csp.exe ${{ matrix.asset_name }}
+
+      - name: Upload binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset_name }}
