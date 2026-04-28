@@ -559,4 +559,257 @@ mod tests {
         assert!(log.get("origin").is_none());
         assert!(log.get("protocol").is_none());
     }
+
+    #[test]
+    fn http_request_log_with_ipv6_peer() {
+        let peer: SocketAddr = "[::1]:443".parse().unwrap();
+        let method = Method::POST;
+        let uri: Uri = "/csp-report".parse().unwrap();
+        let headers = HeaderMap::new();
+        let log = build_http_request_log(&peer, &method, &uri, &headers, 0);
+
+        assert_eq!(log["remoteIp"], "[::1]:443");
+    }
+
+    // --- Unit tests for is_accepted_content_type ---
+
+    #[test]
+    fn accepted_content_type_csp_report() {
+        assert!(is_accepted_content_type("application/csp-report"));
+    }
+
+    #[test]
+    fn accepted_content_type_json() {
+        assert!(is_accepted_content_type("application/json"));
+    }
+
+    #[test]
+    fn accepted_content_type_reports_json() {
+        assert!(is_accepted_content_type("application/reports+json"));
+    }
+
+    #[test]
+    fn accepted_content_type_with_params() {
+        assert!(is_accepted_content_type("application/csp-report; charset=utf-8"));
+        assert!(is_accepted_content_type("application/json; charset=utf-8"));
+        assert!(is_accepted_content_type("application/reports+json; charset=utf-8"));
+    }
+
+    #[test]
+    fn accepted_content_type_uppercase() {
+        assert!(is_accepted_content_type("APPLICATION/CSP-REPORT"));
+        assert!(is_accepted_content_type("Application/Json"));
+        assert!(is_accepted_content_type("APPLICATION/REPORTS+JSON"));
+    }
+
+    #[test]
+    fn rejected_content_type_empty() {
+        assert!(!is_accepted_content_type(""));
+    }
+
+    #[test]
+    fn rejected_content_type_text_plain() {
+        assert!(!is_accepted_content_type("text/plain"));
+    }
+
+    #[test]
+    fn rejected_content_type_text_html() {
+        assert!(!is_accepted_content_type("text/html"));
+    }
+
+    #[test]
+    fn rejected_content_type_multipart() {
+        assert!(!is_accepted_content_type("multipart/form-data"));
+    }
+
+    // --- Unit tests for extract_trace ---
+
+    // Serialise access to the process environment to avoid data races between tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire the environment lock, recovering from a previous test panic so that
+    /// later tests are not permanently blocked.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// RAII guard that removes an environment variable when dropped, ensuring
+    /// cleanup even if the test panics.
+    struct EnvVarGuard(&'static str);
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    #[test]
+    fn extract_trace_returns_resource_name() {
+        use axum::http::HeaderValue;
+        let _lock = env_lock();
+        std::env::set_var("GOOGLE_CLOUD_PROJECT", "my-project");
+        let _cleanup = EnvVarGuard("GOOGLE_CLOUD_PROJECT");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-cloud-trace-context",
+            HeaderValue::from_static("abc123def/SPAN_ID;o=1"),
+        );
+        assert_eq!(
+            extract_trace(&headers),
+            Some("projects/my-project/traces/abc123def".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_trace_returns_none_when_project_missing() {
+        use axum::http::HeaderValue;
+        let _lock = env_lock();
+        std::env::remove_var("GOOGLE_CLOUD_PROJECT");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-cloud-trace-context",
+            HeaderValue::from_static("abc123def/SPAN_ID;o=1"),
+        );
+        assert_eq!(extract_trace(&headers), None);
+    }
+
+    #[test]
+    fn extract_trace_returns_none_when_header_missing() {
+        let _lock = env_lock();
+        std::env::set_var("GOOGLE_CLOUD_PROJECT", "my-project");
+        let _cleanup = EnvVarGuard("GOOGLE_CLOUD_PROJECT");
+        assert_eq!(extract_trace(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn extract_trace_returns_none_when_trace_id_is_empty() {
+        use axum::http::HeaderValue;
+        let _lock = env_lock();
+        std::env::set_var("GOOGLE_CLOUD_PROJECT", "my-project");
+        let _cleanup = EnvVarGuard("GOOGLE_CLOUD_PROJECT");
+        let mut headers = HeaderMap::new();
+        // Header starts with '/', so the part before '/' is an empty string.
+        headers.insert(
+            "x-cloud-trace-context",
+            HeaderValue::from_static("/SPAN_ID;o=1"),
+        );
+        assert_eq!(extract_trace(&headers), None);
+    }
+
+    #[test]
+    fn extract_trace_handles_header_without_slash() {
+        use axum::http::HeaderValue;
+        let _lock = env_lock();
+        std::env::set_var("GOOGLE_CLOUD_PROJECT", "my-project");
+        let _cleanup = EnvVarGuard("GOOGLE_CLOUD_PROJECT");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-cloud-trace-context",
+            HeaderValue::from_static("abc123def"),
+        );
+        assert_eq!(
+            extract_trace(&headers),
+            Some("projects/my-project/traces/abc123def".to_string())
+        );
+    }
+
+    // --- Unit tests for set_trace ---
+
+    #[test]
+    fn set_trace_injects_field_when_some() {
+        let mut entry = serde_json::json!({ "message": "test" });
+        set_trace(&mut entry, &Some("projects/p/traces/t".to_string()));
+        assert_eq!(
+            entry["logging.googleapis.com/trace"],
+            "projects/p/traces/t"
+        );
+    }
+
+    #[test]
+    fn set_trace_does_not_inject_field_when_none() {
+        let mut entry = serde_json::json!({ "message": "test" });
+        set_trace(&mut entry, &None);
+        assert!(entry.get("logging.googleapis.com/trace").is_none());
+    }
+
+    // --- Additional integration tests ---
+
+    #[tokio::test]
+    async fn csp_report_accepts_content_type_with_params() {
+        let body = serde_json::json!({"csp-report": {"blocked-uri": "https://evil.com"}});
+        let response = app("/csp-report")
+            .oneshot(csp_post(
+                "/csp-report",
+                "application/csp-report; charset=utf-8",
+                serde_json::to_vec(&body).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn csp_report_accepts_uppercase_content_type() {
+        let body = serde_json::json!({"csp-report": {}});
+        let response = app("/csp-report")
+            .oneshot(csp_post(
+                "/csp-report",
+                "APPLICATION/CSP-REPORT",
+                serde_json::to_vec(&body).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn csp_report_rejects_put_method() {
+        let body = serde_json::json!({"test": true});
+        let response = app("/csp-report")
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/csp-report")
+                    .header("content-type", "application/csp-report")
+                    .extension(ConnectInfo(fake_peer()))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn csp_report_rejects_delete_method() {
+        let response = app("/csp-report")
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/csp-report")
+                    .extension(ConnectInfo(fake_peer()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn csp_report_rejects_empty_body() {
+        // An empty body is not valid JSON and should return 400 Bad Request.
+        let response = app("/csp-report")
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/csp-report")
+                    .header("content-type", "application/csp-report")
+                    .extension(ConnectInfo(fake_peer()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }
