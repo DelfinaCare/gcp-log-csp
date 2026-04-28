@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 use axum::{
     body::Bytes,
     extract::{ConnectInfo, DefaultBodyLimit},
@@ -46,24 +48,27 @@ async fn handle_csp_report(
     }
 
     let http_request = build_http_request_log(&peer_addr, &method, &uri, &headers, body.len());
+    let trace = extract_trace(&headers);
 
     match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(parsed) => {
-            let log_entry = serde_json::json!({
+            let mut log_entry = serde_json::json!({
                 "severity": "WARNING",
                 "message": "CSP violation report received",
                 "httpRequest": http_request,
                 "csp-report": parsed
             });
+            set_trace(&mut log_entry, &trace);
             println!("{log_entry}");
         }
         Err(_) => {
-            let log_entry = serde_json::json!({
+            let mut log_entry = serde_json::json!({
                 "severity": "WARNING",
                 "message": "CSP report received with invalid JSON body",
                 "httpRequest": http_request,
                 "raw-body": String::from_utf8_lossy(&body)
             });
+            set_trace(&mut log_entry, &trace);
             println!("{log_entry}");
             return StatusCode::BAD_REQUEST;
         }
@@ -156,6 +161,64 @@ fn is_accepted_content_type(ct: &str) -> bool {
         || ct_lower.starts_with("application/reports+json")
 }
 
+/// Extract the GCP trace resource name from the `X-Cloud-Trace-Context` header.
+///
+/// The header format is `TRACE_ID/SPAN_ID;o=OPTIONS`.  Cloud Run always sets
+/// this header.  We return the full `projects/{project}/traces/{trace_id}`
+/// resource name that GCP structured logging expects in the
+/// `logging.googleapis.com/trace` field.  If the header or the `GOOGLE_CLOUD_PROJECT`
+/// env-var is missing, returns `None`.
+fn extract_trace(headers: &HeaderMap) -> Option<String> {
+    let header_val = headers
+        .get("x-cloud-trace-context")
+        .and_then(|v| v.to_str().ok())?;
+    // Trace ID is everything before the first '/'.
+    let trace_id = header_val.split('/').next().filter(|s| !s.is_empty())?;
+    let project = std::env::var("GOOGLE_CLOUD_PROJECT").ok()?;
+    Some(format!("projects/{project}/traces/{trace_id}"))
+}
+
+/// If a GCP trace string is present, inject it into the log entry under the
+/// `logging.googleapis.com/trace` key so Cloud Logging correlates the entry
+/// with the originating request trace.
+fn set_trace(log_entry: &mut serde_json::Value, trace: &Option<String>) {
+    if let Some(t) = trace {
+        log_entry["logging.googleapis.com/trace"] = serde_json::Value::String(t.clone());
+    }
+}
+
+/// Wait for a SIGTERM or Ctrl+C signal, then log and return so the server
+/// can drain in-flight connections.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    let log_entry = serde_json::json!({
+        "severity": "INFO",
+        "message": "Shutdown signal received, draining connections"
+    });
+    println!("{log_entry}");
+}
+
 #[tokio::main]
 async fn main() {
     let port: u16 = std::env::var("PORT")
@@ -165,16 +228,33 @@ async fn main() {
 
     let csp_endpoint = std::env::var("CSP_ENDPOINT").unwrap_or_else(|_| "/csp-report".to_string());
 
+    if !csp_endpoint.starts_with('/') {
+        let log_entry = serde_json::json!({
+            "severity": "ERROR",
+            "message": format!("CSP_ENDPOINT must start with '/', got: {csp_endpoint}")
+        });
+        println!("{log_entry}");
+        std::process::exit(1);
+    }
+
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind to address");
 
-    eprintln!("Listening on {addr}");
+    let log_entry = serde_json::json!({
+        "severity": "INFO",
+        "message": format!("Listening on {addr}"),
+        "port": port,
+        "csp_endpoint": &csp_endpoint
+    });
+    println!("{log_entry}");
+
     axum::serve(
         listener,
         app(&csp_endpoint).into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("server error");
 }
