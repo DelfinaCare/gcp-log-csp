@@ -571,8 +571,6 @@ mod tests {
         assert_eq!(log["remoteIp"], "[::1]:443");
     }
 
-    // --- Unit tests for is_accepted_content_type ---
-
     #[test]
     fn accepted_content_type_csp_report() {
         assert!(is_accepted_content_type("application/csp-report"));
@@ -625,8 +623,6 @@ mod tests {
     fn rejected_content_type_multipart() {
         assert!(!is_accepted_content_type("multipart/form-data"));
     }
-
-    // --- Unit tests for extract_trace ---
 
     // Serialise access to the process environment to avoid data races between tests.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -716,8 +712,6 @@ mod tests {
         );
     }
 
-    // --- Unit tests for set_trace ---
-
     #[test]
     fn set_trace_injects_field_when_some() {
         let mut entry = serde_json::json!({ "message": "test" });
@@ -731,8 +725,6 @@ mod tests {
         set_trace(&mut entry, &None);
         assert!(entry.get("logging.googleapis.com/trace").is_none());
     }
-
-    // --- Additional integration tests ---
 
     #[tokio::test]
     async fn csp_report_accepts_content_type_with_params() {
