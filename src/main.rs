@@ -590,9 +590,13 @@ mod tests {
 
     #[test]
     fn accepted_content_type_with_params() {
-        assert!(is_accepted_content_type("application/csp-report; charset=utf-8"));
+        assert!(is_accepted_content_type(
+            "application/csp-report; charset=utf-8"
+        ));
         assert!(is_accepted_content_type("application/json; charset=utf-8"));
-        assert!(is_accepted_content_type("application/reports+json; charset=utf-8"));
+        assert!(is_accepted_content_type(
+            "application/reports+json; charset=utf-8"
+        ));
     }
 
     #[test]
@@ -718,10 +722,7 @@ mod tests {
     fn set_trace_injects_field_when_some() {
         let mut entry = serde_json::json!({ "message": "test" });
         set_trace(&mut entry, &Some("projects/p/traces/t".to_string()));
-        assert_eq!(
-            entry["logging.googleapis.com/trace"],
-            "projects/p/traces/t"
-        );
+        assert_eq!(entry["logging.googleapis.com/trace"], "projects/p/traces/t");
     }
 
     #[test]
