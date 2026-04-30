@@ -57,3 +57,44 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           push: false
+          load: true
+          tags: gcp-log-csp:test
+      - name: Integration test
+        run: |
+          # Start container and ensure it is removed on exit
+          docker run -d --name csp-test -p 8080:8080 gcp-log-csp:test
+          trap 'docker stop csp-test; docker rm csp-test' EXIT
+
+          # Wait up to 10 s for the server to become ready
+          for i in $(seq 1 10); do
+            if curl -sf http://localhost:8080/health > /dev/null; then
+              echo "Container is healthy after ${i}s"
+              break
+            fi
+            if [ "$i" -eq 10 ]; then
+              echo "Container did not become healthy in time"
+              docker logs csp-test
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # Health check must return HTTP 200
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+          [ "$STATUS" = "200" ] || { echo "Health check returned $STATUS, expected 200"; exit 1; }
+
+          # Send a sample CSP report and expect HTTP 204
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST http://localhost:8080/csp-report \
+            -H "Content-Type: application/csp-report" \
+            -d '{"csp-report":{"document-uri":"https://example.com/","violated-directive":"script-src","blocked-uri":"https://evil.com/script.js"}}')
+          [ "$STATUS" = "204" ] || { echo "CSP report returned $STATUS, expected 204"; exit 1; }
+
+          # Verify the container produced a structured log entry for the report
+          docker logs csp-test 2>&1 | grep -q "CSP violation report received" || {
+            echo "Expected log entry not found in container output:"
+            docker logs csp-test
+            exit 1
+          }
+
+          echo "All integration tests passed"
