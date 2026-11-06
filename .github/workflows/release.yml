@@ -61,7 +61,9 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          # Push with zstd-compressed layers (requires OCI media types).
+          # force-compression recompresses any base layers that were gzip.
+          outputs: type=image,push=true,oci-mediatypes=true,compression=zstd,compression-level=19,force-compression=true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           sbom: true
